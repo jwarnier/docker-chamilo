@@ -1,61 +1,84 @@
-FROM ubuntu:14.04
-MAINTAINER Yannick Warnier <ywarnier@chamilo.org>
+# Chamilo LMS — single-container runtime (PHP 8.3-FPM + nginx).
+#
+# Slim / docker-only image: the LMS source is NOT vendored into this repo.
+# It is fetched at build time from a pinned ref of chamilo/chamilo-lms, so
+# the image is fully reproducible and this repo stays small.
+#
+# This replaces the old PHP 5 / ubuntu 14.04 image, which cannot run the
+# current (Symfony 7 / PHP 8) LMS.
+FROM php:8.3-fpm
 
-# Keep upstart from complaining
-RUN dpkg-divert --local --rename --add /sbin/initctl
-RUN ln -sf /bin/true /sbin/initctl
+# Pinned ref of chamilo/chamilo-lms. Bump to release a new LMS version.
+# Accepts a git tag (e.g. v3.0.0-beta.2) or a full commit SHA.
+ARG CHAMILO_LMS_REF=c75d279bf4757617286827c5c8dae02a74f438e0
 
-# Update Ubuntu and install basic PHP stuff
-RUN apt-get -y update && apt-get install -y \
-  curl \
-  git \
-  libapache2-mod-php5 \
-  php5-cli \
-  php5-curl \
-  php5-gd \
-  php5-intl \
-  php5-mysql \
-  wget
+# System packages + PHP extensions the LMS needs.
+#   curl/ca-certificates : fetch the pinned source; Composer zip dists (TLS)
+#   nginx               : serves the LMS over HTTP (front controller -> FPM)
+# git is intentionally omitted — every Composer dependency in composer.lock
+# ships a zip dist (no VCS-only packages), so Composer downloads archives via
+# the PHP zip extension instead of cloning.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      curl \
+      ca-certificates \
+      nginx \
+      libicu-dev \
+      libldap-dev \
+      libpng-dev \
+      libonig-dev \
+      libxml2-dev \
+      libxslt1-dev \
+      libzip-dev \
+    && docker-php-ext-install -j$(nproc) \
+      bcmath \
+      exif \
+      gd \
+      intl \
+      ldap \
+      opcache \
+      pdo \
+      pdo_mysql \
+      soap \
+      xsl \
+      zip \
+    && pecl install --onlyreqdeps --force redis \
+    && docker-php-ext-enable redis \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN apt-get install -y openssh-server
-RUN mkdir -p /var/run/sshd
+# Web tier: drop the stock default vhost, install ours (listens on :80,
+# proxies .php to PHP-FPM at 127.0.0.1:9000, docroot /app/chamilo-lms/public).
+RUN rm -f /etc/nginx/sites-enabled/default \
+    && rm -rf /var/www/html
+COPY nginx.conf /etc/nginx/conf.d/default.conf
 
-# Get Chamilo
-RUN mkdir -p /var/www/chamilo
-ADD https://github.com/chamilo/chamilo-lms/archive/v1.10.0-alpha.tar.gz /var/www/chamilo/chamilo.tar.gz
-WORKDIR /var/www/chamilo
-RUN tar zxf chamilo.tar.gz;rm chamilo.tar.gz;mv chamilo* www
-WORKDIR www
-RUN chown -R www-data:www-data \
-  app \
-  main/default_course_document/images \
-  main/lang \
-  vendor \
-  web
+# Raise PHP memory limit for CLI and any child processes.
+# Symfony's `assets:install` post-install script boots the kernel and
+# exhausts the 128M default; -1 keeps the build from OOM-ing.
+RUN echo "memory_limit=-1" > /usr/local/etc/php/conf.d/zz-memory.ini
 
-# Get Composer (putting the download in /root is discutible)
-WORKDIR /root
-RUN curl -sS https://getcomposer.org/installer | php
-RUN chmod +x composer.phar
-RUN mv composer.phar /usr/local/bin/composer
+# Fetch the LMS source at the pinned ref (build-time, not vendored).
+# The tarball extracts to a single top-level dir (chamilo-lms-<ref>); rename
+# it to /app/chamilo-lms so the path is stable for a tag or a full SHA.
+RUN curl -fsSL "https://github.com/chamilo/chamilo-lms/archive/${CHAMILO_LMS_REF}.tar.gz" -o /tmp/lms.tar.gz \
+    && mkdir -p /app/lms-fetch \
+    && tar -xzf /tmp/lms.tar.gz -C /app/lms-fetch \
+    && mv /app/lms-fetch/chamilo-lms-* /app/chamilo-lms \
+    && rm -f /tmp/lms.tar.gz \
+    && rm -rf /app/lms-fetch /root/.cache
 
-# Get Chash
-RUN git clone https://github.com/chamilo/chash.git chash
-WORKDIR chash
-RUN composer update --no-dev
-RUN php -d phar.readonly=0 createPhar.php
-RUN chmod +x chash.phar && mv chash.phar /usr/local/bin/chash
+WORKDIR /app/chamilo-lms
 
-# Configure and start Apache
-ADD chamilo.conf /etc/apache2/sites-available/chamilo.conf
-RUN a2ensite chamilo
-RUN a2enmod rewrite
-RUN /etc/init.d/apache2 restart
-RUN echo "127.0.0.1 docker.chamilo.net" >> /etc/hosts
+# Install Composer, then PHP dependencies + the post-install asset step.
+# (assets:install boots the Symfony kernel; memory_limit=-1 keeps it from
+# exhausting the 128M default.)
+RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer \
+    && composer install --no-interaction --optimize-autoloader \
+    && rm -rf /root/.composer /root/.cache/composer
 
-# Go to Chamilo folder and install
-# Soon... (this involves having a SQL server in a linked container)
+# Start PHP-FPM (daemon) + nginx (foreground, PID 1) on container start.
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["nginx", "-g", "daemon off;"]
 
-WORKDIR /var/www/chamilo/www
-EXPOSE 22 80
-CMD ["/bin/bash"]
+EXPOSE 80 9000
