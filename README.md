@@ -3,9 +3,7 @@
 Single-container Docker image for the [Chamilo LMS](https://www.chamilo.org).
 
 This image bundles **PHP 8.3-FPM** and **nginx** in one container and serves the
-LMS over HTTP on port **80** (nginx → PHP-FPM on `127.0.0.1:9000`). It is the
-successor to the previous PHP 5 / Ubuntu 14.04 image, which cannot run the
-current (Symfony 7 / PHP 8) LMS.
+LMS over HTTP on port **80** (nginx → PHP-FPM on `127.0.0.1:9000`).
 
 ## How it works
 
