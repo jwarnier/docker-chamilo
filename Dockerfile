@@ -1,12 +1,10 @@
-# Chamilo LMS — single-container runtime (PHP 8.3-FPM + nginx).
+# Chamilo LMS — single-container runtime (PHP FPM + nginx).
 #
 # Slim / docker-only image: the LMS source is NOT vendored into this repo.
 # It is fetched at build time from a pinned ref of chamilo/chamilo-lms, so
 # the image is fully reproducible and this repo stays small.
-#
-# This replaces the old PHP 5 / ubuntu 14.04 image, which cannot run the
-# current (Symfony 7 / PHP 8) LMS.
-FROM php:8.3-fpm
+ARG PHP_VER=8.3
+FROM php:${PHP_VER}-fpm
 
 # Pinned ref of chamilo/chamilo-lms. Bump to release a new LMS version.
 # Accepts a git tag (e.g. v3.0.0-beta.2) or a full commit SHA.
