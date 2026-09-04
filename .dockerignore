@@ -8,4 +8,5 @@
 tmp/
 # Docs live in the repo for humans; the build never needs them in-context.
 AGENTS.md
+CLAUDE.md
 SETUP.md
