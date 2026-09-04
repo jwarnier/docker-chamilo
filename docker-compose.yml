@@ -27,7 +27,7 @@ services:
     restart: unless-stopped
 
   db:
-    image: mariadb:11
+    image: docker.io/library/mariadb:11
     environment:
       - MARIADB_ROOT_PASSWORD=chamilo
       - MARIADB_DATABASE=chamilo
@@ -38,7 +38,7 @@ services:
     restart: unless-stopped
 
   redis:
-    image: redis:7
+    image: docker.io/library/redis:7
     ports:
       - "6379:6379"
     volumes:
