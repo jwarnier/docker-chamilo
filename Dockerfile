@@ -74,8 +74,7 @@ RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local
     && rm -rf /root/.composer /root/.cache/composer
 
 # Start PHP-FPM (daemon) + nginx (foreground, PID 1) on container start.
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
+COPY --chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["nginx", "-g", "daemon off;"]
 
