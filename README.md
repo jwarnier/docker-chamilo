@@ -68,6 +68,8 @@ docker build --build-arg CHAMILO_LMS_REF=<tag-or-sha> -t chamilo-lms .
 
 ## Image size
 
-~1.3 GB after the source fetch (LMS source + vendor + PHP 8.3 + nginx). The
-nested `.git` of the LMS source is excluded at build time, and the old
-1.2 GiB `.git` from the previous approach is gone.
+~1.2 GB after the source fetch (LMS source + prod-only vendor + PHP 8.3 +
+nginx). Dev-only Composer packages are stripped at build time (see the
+Dockerfile's two-step `composer install`), and the nested `.git` of the LMS
+source is excluded at build time — the old 1.2 GiB `.git` from the previous
+approach is gone.

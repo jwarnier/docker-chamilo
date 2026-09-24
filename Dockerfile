@@ -66,11 +66,18 @@ RUN curl -fsSL "https://github.com/chamilo/chamilo-lms/archive/${CHAMILO_LMS_REF
 
 WORKDIR /app/chamilo-lms
 
-# Install Composer, then PHP dependencies + the post-install asset step.
-# (assets:install boots the Symfony kernel; memory_limit=-1 keeps it from
-# exhausting the 128M default.)
+# Install Composer, then PHP dependencies. Two steps:
+#   1. full install (dev + prod) — runs `assets:install` (a dev-env kernel
+#      boot, which needs the dev-only DebugBundle/WebProfilerBundle), copying
+#      bundle assets into public/.
+#   2. sync to prod-only (`--no-dev`), dropping dev packages (psalm, phpstan,
+#      phpunit, debug/web-profiler bundles, maker-bundle, ...). `--no-scripts`
+#      because re-running `assets:install` here would boot the kernel without
+#      the dev bundles it needs (or, in prod, need a resolvable DB — there is
+#      no DB at image-build time, so the asset step must run in step 1).
 RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer \
     && composer install --no-interaction --optimize-autoloader \
+    && composer install --no-interaction --no-dev --no-scripts --optimize-autoloader \
     && rm -rf /root/.composer /root/.cache/composer
 
 # Start PHP-FPM (daemon) + nginx (foreground, PID 1) on container start.
