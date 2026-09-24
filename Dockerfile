@@ -86,3 +86,11 @@ ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["nginx", "-g", "daemon off;"]
 
 EXPOSE 80
+
+# Liveness probe: the web tier (nginx -> FPM) is up and answering HTTP.
+# Accepts ANY status code — a fresh LMS returns 5xx until the installer runs,
+# and that still means the container is alive and serving. Only a connection
+# failure (no response / FPM down) is "unhealthy". curl is already installed
+# (source fetch); --max-time caps the wait so a stuck FPM worker can't hang.
+HEALTHCHECK --start-period=15s --interval=30s --timeout=5s --retries=3 \
+  CMD ["sh", "-c", "curl -s --max-time 5 -o /dev/null -w '%{http_code}' http://127.0.0.1/ 2>/dev/null | grep -qE '^[0-9]{3}$'"]

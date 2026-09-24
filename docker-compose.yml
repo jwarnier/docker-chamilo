@@ -20,8 +20,10 @@ services:
       - APP_ENV=prod
       - APP_SECRET=changeme-32-chars-min-aaaaaaaa
     depends_on:
-      - db
-      - redis
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     volumes:
       - chamilo_data:/app/chamilo-lms/var
     restart: unless-stopped
@@ -35,6 +37,15 @@ services:
       - MARIADB_PASSWORD=chamilo
     volumes:
       - db_data:/var/lib/mysql
+    # "ready to accept connections" — used by chamilo's depends_on
+    # (condition: service_healthy). mariadb:11 ships the client as
+    # `mariadb-admin` (not `mysqladmin`); -u root:-pchamilo authenticates.
+    healthcheck:
+      test: ["CMD", "mariadb-admin", "ping", "-h", "localhost", "-u", "root", "-pchamilo"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
     restart: unless-stopped
 
   redis:
@@ -43,6 +54,11 @@ services:
       - "6379:6379"
     volumes:
       - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
 
 volumes:
