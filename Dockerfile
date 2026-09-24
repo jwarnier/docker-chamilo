@@ -85,6 +85,12 @@ RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local
     && composer install --no-interaction --no-dev --no-scripts --optimize-autoloader \
     && rm -rf /root/.composer /root/.cache/composer
 
+# The FPM `www` pool already runs as `www-data` (www.conf), but the app tree
+# is root-owned, so the pool workers couldn't write to the runtime dirs
+# Symfony writes constantly (var/cache, var/log, var/upload) — proven
+# Permission-denied. Hand the tree to the runtime user.
+RUN chown -R www-data:www-data /app/chamilo-lms
+
 # Start PHP-FPM (daemon) + nginx (foreground, PID 1) on container start.
 COPY --chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
