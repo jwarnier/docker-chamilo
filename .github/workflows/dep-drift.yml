@@ -1,0 +1,240 @@
+# dep-drift — weekly dependency drift for what native Dependabot can't manage.
+#
+# Native Dependabot (.github/dependabot.yml) only understands real manifests,
+# and this docker-only repo has exactly one: the GitHub Actions in build.yml.
+# The other things that can go stale — and that a dependabot run can't touch
+# because they aren't a recognised ecosystem — are handled HERE, weekly:
+#
+#   * CHAMILO_LMS_REF — a raw git ref of chamilo/chamilo-lms fetched by the
+#     Dockerfile at build time. We track it against the latest stable release
+#     tag of chamilo/chamilo-lms (AGENTS.md: "Prefer a release tag for
+#     reproducible public builds" — NOT master, so the image stays reproducible).
+#   * docker-compose.yml images — NOT managed here on purpose. mariadb:11 and
+#     redis:7 are floating minors; `docker compose pull` already fetches the
+#     newest 11.x / 7.x each time, so there is no pin to bump and nothing to
+#     detect. (If you ever pin them to patch versions, add them below.)
+#   * the PHP base (FROM php:${PHP_VER}-fpm) — deliberately pinned to 8.3 (the
+#     point of the takeover branch). A major PHP jump is a human decision, so
+#     it is left out of the automation.
+#
+# WHAT IT OPENS (automatically, weekly):
+#   * a PR  — the one-line Dockerfile bump to the newest stable LMS tag, and
+#   * an Issue — the weekly drift report.
+#
+#   The PR is FAIL-CLOSED: before it opens, this workflow builds the image at
+#   the candidate ref (the exact build from build.yml, via docker/build-
+#   push-action). A PR is opened only if that build succeeds. If it fails, NO
+#   PR is opened and the drift Issue records the failure instead — so a large
+#   LMS jump (the pin can be many commits behind the latest tag) never lands as
+#   a red PR you have to close. It is OPENED, not merged: a maintainer reviews
+#   the one-line diff and merges. The PR's own push re-runs build.yml as a
+#   second gate.
+#
+#   The Issue is opened only when there is drift (a PR was opened, or the build
+#   gate failed). When the pin already equals the latest stable tag it is a
+#   clean no-op — no weekly "all up to date" noise.
+#
+# Cost: GitHub-hosterned runners are free/unmetered for public repos, so this
+# is not metered against the 2,000-min/500 MB quota (private only). The real
+# cost is one cold image build per drift week; up-to-date weeks skip the build.
+name: dep-drift
+
+on:
+  # Mondays 06:00 UTC.
+  schedule:
+    - cron: "0 6 * * 1"
+  # Manual run (same as the schedule: detect latest stable tag, build-gate, open).
+  workflow_dispatch:
+
+# GITHUB_TOKEN is read-only by default; grant exactly what this needs. The
+# built-in token can push a fresh branch and open a PR on THIS repo (no PAT
+# required) because we target the repo the workflow runs in — which is why it
+# works in the fork today and would work in upstream if copied there later.
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+env:
+  LMS_REPO: chamilo/chamilo-lms
+  # PR branch prefix; keep stable for dedup.
+  PR_BRANCH_PREFIX: dep-drift/chamilo-lms-
+
+jobs:
+  drift:
+    name: Detect, build-gate, open
+    runs-on: ubuntu-latest
+    # A cold LMS build can exceed the default 1h; match build.yml's headroom.
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Same buildx builder as build.yml so this gate is byte-identical to the
+      # real build. Pinned to the same published minor.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4.4.1
+
+      - name: Detect drift (latest stable tag vs current pin)
+        id: detect
+        run: |
+          set -euo pipefail
+          # Current pin: the first "ARG CHAMILO_LMS_REF=<value>" in the Dockerfile.
+          CUR="$(grep -m1 -oE '^ARG[[:space:]]+CHAMILO_LMS_REF=' Dockerfile | awk '{print $2}')"
+          echo "current pin: $CUR"
+          # Latest STABLE release tag (non-draft, non-prerelease). releases/latest
+          # 404s if there is no stable release yet — fail the run, don't guess.
+          LATEST="$(curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            https://api.github.com/repos/$LMS_REPO/releases/latest \
+            | jq -r .tag_name)"
+          echo "latest stable: $LATEST"
+          if [ "$CUR" = "$LATEST" ]; then
+            echo "DRIFT=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "DRIFT=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "CUR=$CUR" >> "$GITHUB_OUTPUT"
+          echo "LATEST=$LATEST" >> "$GITHUB_OUTPUT"
+
+      # Up-to-date: nothing to say. No build, no PR, no Issue.
+      - name: Up to date — no-op
+        if: steps.detect.outputs.DRIFT == 'false'
+        run: echo "CHAMILO_LMS_REF already equals the latest stable tag; nothing to open."
+
+      # Build at the candidate ref — the gate. Runs only when there is drift.
+      # Identical build to build.yml (same action, same pinning), but with the
+      # candidate ref as a build-arg. A failure here means NO PR is opened.
+      - name: Build-gate at candidate ref
+        if: steps.detect.outputs.DRIFT == 'true'
+        id: gate
+        uses: docker/build-push-action@v7.4.0
+        with:
+          context: .
+          load: true
+          build-args: |
+            CHAMILO_LMS_REF=${{ steps.detect.outputs.LATEST }}
+          tags: dep-drift-gate:${{ steps.detect.outputs.LATEST }}
+
+      # Build failed: NO PR. Record it as the drift Issue instead (dedup by ref).
+      - name: Record build-gate failure (no PR opened)
+        if: steps.detect.outputs.DRIFT == 'true' && steps.gate.outcome == 'failure'
+        env:
+          LATEST: ${{ steps.detect.outputs.LATEST }}
+        run: |
+          set -euo pipefail
+          REPO="$GITHUB_REPOSITORY"
+          TITLE="chamilo-lms drift (build FAILED) $LATEST"
+          # Dedup: an open Issue already records this failure for this ref?
+          EXISTING="$(curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/$REPO/issues?state=open" \
+            | jq -r --arg t "$TITLE" '.[] | select(.title == $t) | .number' | head -1 || true)"
+          if [ -n "${EXISTING:-}" ]; then
+            echo "A failure Issue for $LATEST already exists (#$EXISTING); not duplicating."
+            exit 0
+          fi
+          cat > pr-body.md <<'EOF'
+          The weekly dep-drift build-gate failed building the image at CHAMILO_LMS_REF=$LATEST,
+          so NO bump PR was opened (fail-closed). The current pin remains unchanged.
+          See the dep-drift workflow run for the build log. Once the build passes at this
+          ref, re-run the workflow to open the PR.
+          EOF
+          jq -n --arg t "$TITLE" --arg b "$(cat pr-body.md)" '{title:$t, body:$b}' > issue.json
+          curl -sSf -X POST "https://api.github.com/repos/$REPO/issues" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'Content-Type: application/json' \
+            --data @issue.json \
+            | jq -r '"Opened failure Issue #" + (.number // "n/a")'
+
+      # Build succeeded: open the one-line bump PR (dedup by branch), then file
+      # the weekly drift report Issue (dedup by from->to pair).
+      - name: Open bump PR + file drift Issue
+        if: steps.detect.outputs.DRIFT == 'true' && steps.gate.outcome == 'success'
+        env:
+          CUR: ${{ steps.detect.outputs.CUR }}
+          LATEST: ${{ steps.detect.outputs.LATEST }}
+        run: |
+          set -euo pipefail
+          REPO="$GITHUB_REPOSITORY"
+          # Default branch of THIS repo (self-addressing: fork master today,
+          # upstream master if this workflow is copied there later).
+          DEFAULT_BRANCH="$(curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            https://api.github.com/repos/$REPO | jq -r .default_branch)"
+          BRANCH="$PR_BRANCH_PREFIX$LATEST"
+          # Dedup: an open PR already targets this ref?
+          EXISTING="$(curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/$REPO/pulls?state=open&head=$BRANCH" \
+            | jq -r '.[0].number // empty')"
+          if [ -n "$EXISTING" ]; then
+            echo "An open PR for $BRANCH already exists (#$EXISTING); skipping the PR."
+            # Still fall through to the Issue (below) — but skip the push.
+            NO_PR=true
+          else
+            NO_PR=false
+          fi
+          if [ "$NO_PR" = "true" ]; then
+            # No new PR, but still make sure the drift report Issue exists.
+            : > /dev/null
+          else
+            git checkout -b "$BRANCH"
+            sed -i -E "s#^ARG[[:space:]]+CHAMILO_LMS_REF=.*#ARG CHAMILO_LMS_REF=$LATEST#" Dockerfile
+            git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -m "build: bump CHAMILO_LMS_REF to $LATEST" \
+              -m "Bumps the pinned chamilo/chamilo-lms ref from $CUR to the latest stable release $LATEST (one-line, fail-closed: this run built the image at $LATEST before opening)."
+            git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/$REPO.git"
+            git push -u origin "$BRANCH"
+          fi
+          # File the weekly drift report Issue (dedup by from->to).
+          TITLE="chamilo-lms drift $CUR -> $LATEST"
+          EXISTING_ISSUE="$(curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/$REPO/issues?state=open" \
+            | jq -r --arg t "$TITLE" '.[] | select(.title == $t) | .number' | head -1 || true)"
+          if [ -n "${EXISTING_ISSUE:-}" ]; then
+            echo "A drift Issue for this pair already exists (#$EXISTING_ISSUE); not duplicating."
+            exit 0
+          fi
+          AHEAD="$(curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/$LMS_REPO/compare/$CUR...$LATEST" \
+            | jq -r '.ahead_by // "?"' 2>/dev/null || echo "?")"
+          cat > issue-body.md <<EOF
+          Weekly dep-drift report.
+          - Current pin: $CUR
+          - Latest stable: $LATEST ($AHEAD commits ahead of the pin)
+          - Outcome: build-gate PASSED at $LATEST; a bump PR was opened (or already open).
+          This Issue is the weekly report; the actual change is the linked PR (one-line
+          Dockerfile diff). Opened automatically by the dep-drift workflow; not auto-merged.
+          EOF
+          jq -n --arg t "$TITLE" --arg b "$(cat issue-body.md)" '{title:$t, body:$b}' > issue.json
+          curl -sSf -X POST "https://api.github.com/repos/$REPO/issues" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'Content-Type: application/json' \
+            --data @issue.json \
+            | jq -r '"Opened drift Issue #" + (.number // "n/a")'
+          # Open the PR (REST: self-addresses $REPO; no gh binary to pin).
+          if [ "$NO_PR" = "false" ]; then
+            cat > pr-body.md <<EOF
+            Bumps the pinned CHAMILO_LMS_REF from $CUR to the latest stable release $LATEST.
+            This PR was opened automatically by the weekly dep-drift workflow, which built
+            the image at $LATEST before opening it (fail-closed). The push re-runs the build
+            job as a second gate. Review the one-line diff and merge; no auto-merge.
+            EOF
+            jq -n --arg title "build: bump CHAMILO_LMS_REF to $LATEST" \
+              --arg head "$BRANCH" --arg base "$DEFAULT_BRANCH" \
+              --arg body "$(cat pr-body.md)" \
+              '{title:$title, head:$head, base:$base, body:$body}' > pr.json
+            curl -sSf -X POST "https://api.github.com/repos/$REPO/pulls" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'Content-Type: application/json' \
+              --data @pr.json \
+              | jq -r '"Opened PR #" + (.number // "n/a")'
+            git remote set-url origin "https://github.com/$REPO.git"
+          fi
