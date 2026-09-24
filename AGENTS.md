@@ -69,7 +69,14 @@ docker exec chamilo nginx -t   # vhost is valid
    **must** `.dockerignore` the nested `.git`.
 3. **Env var names.** The app reads **`DATABASE_*`** (see `.env.dist` of the
    LMS), **not** `DB_*`. The compose sets `DATABASE_HOST=db` etc. Renaming
-   these breaks the DB connection.
+   these breaks the DB connection. The 4 sensitive values
+   (`DATABASE_PASSWORD`, `MARIADB_ROOT_PASSWORD`, `MARIADB_PASSWORD`,
+   `APP_SECRET`) are read from a gitignored `.env` (template in `.env.example`);
+   the compose uses `${VAR:?required in .env}`, so a missing value fails at
+   parse time. **Do not commit `.env` or hard-code the values back into
+   `docker-compose.yml`.** The `.env` mechanism (not a native `secrets:`
+   block) is the portable choice because the `mariadb:11` image reads
+   `MARIADB_ROOT_PASSWORD` from env, not from a Docker secret file.
 4. **FPM is on `9000`, nginx on `80`.** nginx proxies `.php` to
    `127.0.0.1:9000`. If you change the FPM port, update **both**
    `nginx.conf` (`fastcgi_pass`) and the `entrypoint.sh` readiness check.

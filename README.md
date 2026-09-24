@@ -24,7 +24,10 @@ The container runs two processes:
 ## Quick start
 
 ```bash
-# Build the image and start the full stack (app + MariaDB + Redis)
+# 1. Provide a local .env (gitignored; template in .env.example)
+cp .env.example .env
+
+# 2. Build the image and start the full stack (app + MariaDB + Redis)
 docker compose up -d --build
 
 # Open the LMS
@@ -43,12 +46,18 @@ Environment variables (read by the Symfony app — see `.env.dist` of the LMS):
 | `DATABASE_PORT`    | `3306`  | |
 | `DATABASE_NAME`    | `chamilo` | |
 | `DATABASE_USER`    | `chamilo` | |
-| `DATABASE_PASSWORD`| `chamilo` | |
+| `DATABASE_PASSWORD`| from `.env` | required in `.env` |
 | `APP_ENV`          | `prod`  | `dev` for verbose error pages |
-| `APP_SECRET`       | —       | required; 32+ chars |
+| `APP_SECRET`       | from `.env` | required in `.env`, 32+ chars |
 
 > **Note:** the app reads `DATABASE_*`, not `DB_*`. Earlier compose examples
 > used `DB_*`, which the LMS ignores.
+>
+> **Secrets:** the 4 sensitive values (`DATABASE_PASSWORD`, `MARIADB_ROOT_PASSWORD`,
+> `MARIADB_PASSWORD`, `APP_SECRET`) come from a gitignored `.env`
+> (template in `.env.example`). The compose uses `${VAR:?required in .env}`,
+> so a missing value fails at parse time instead of silently using a weak
+> default.
 
 ## Releasing a new LMS version
 

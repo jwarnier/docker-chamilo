@@ -16,6 +16,10 @@ PID 1.
 ## Bring up the full stack
 
 ```bash
+# 1. Provide a local .env (gitignored; template in .env.example)
+cp .env.example .env
+
+# 2. Start the full stack (app + MariaDB + Redis)
 docker compose up -d --build
 ```
 
@@ -33,14 +37,19 @@ through creating the database, the admin account, and completing the install.
 
 ## Database
 
-The `db` service pre-creates a database and user:
+The `db` service pre-creates a database and user (values read from `.env` —
+template in `.env.example`, gitignored):
 
 | Item | Value |
 |------|-------|
-| Root password | `chamilo` |
+| Root password | `chamilo` (dev default) |
 | Database | `chamilo` |
 | User | `chamilo` |
-| Password | `chamilo` |
+| Password | `chamilo` (dev default) |
+
+The compose uses `${VAR:?required in .env}`, so a missing `.env` fails at parse
+time instead of silently using a weak default. For a real deployment, set
+strong values in `.env`.
 
 For an existing database, point `DATABASE_*` at it instead.
 
