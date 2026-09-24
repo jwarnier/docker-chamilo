@@ -59,19 +59,13 @@ COPY nginx.conf /etc/nginx/conf.d/default.conf
 RUN echo "memory_limit=-1" > /usr/local/etc/php/conf.d/zz-memory.ini \
     && echo "php_admin_value[memory_limit] = 256M" >> /usr/local/etc/php-fpm.d/www.conf
 
-# Fetch the LMS source at the pinned ref (build-time, not vendored).
-# The tarball extracts to a single top-level dir (chamilo-lms-<ref>); rename
-# it to /app/chamilo-lms so the path is stable for a tag or a full SHA.
-RUN curl -fsSL "https://github.com/chamilo/chamilo-lms/archive/${CHAMILO_LMS_REF}.tar.gz" -o /tmp/lms.tar.gz \
-    && mkdir -p /app/lms-fetch \
-    && tar -xzf /tmp/lms.tar.gz -C /app/lms-fetch \
-    && mv /app/lms-fetch/chamilo-lms-* /app/chamilo-lms \
-    && rm -f /tmp/lms.tar.gz \
-    && rm -rf /app/lms-fetch /root/.cache
-
-WORKDIR /app/chamilo-lms
-
-# Install Composer, then PHP dependencies. Two steps:
+# Fetch the LMS source, install Composer deps, and chown — ONE layer.
+#
+# Fetch: build-time, not vendored. The tarball extracts to a single top-level
+# dir (chamilo-lms-<ref>); rename it to /app/chamilo-lms so the path is stable
+# for a tag or a full SHA.
+#
+# Composer: two steps, one run —
 #   1. full install (dev + prod) — runs `assets:install` (a dev-env kernel
 #      boot, which needs the dev-only DebugBundle/WebProfilerBundle), copying
 #      bundle assets into public/.
@@ -80,16 +74,33 @@ WORKDIR /app/chamilo-lms
 #      because re-running `assets:install` here would boot the kernel without
 #      the dev bundles it needs (or, in prod, need a resolvable DB — there is
 #      no DB at image-build time, so the asset step must run in step 1).
-RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer \
-    && composer install --no-interaction --optimize-autoloader \
-    && composer install --no-interaction --no-dev --no-scripts --optimize-autoloader \
-    && rm -rf /root/.composer /root/.cache/composer
-
-# The FPM `www` pool already runs as `www-data` (www.conf), but the app tree
-# is root-owned, so the pool workers couldn't write to the runtime dirs
+#
+# Chown: the FPM `www` pool already runs as `www-data` (www.conf), but the app
+# tree is root-owned, so the pool workers couldn't write to the runtime dirs
 # Symfony writes constantly (var/cache, var/log, var/upload) — proven
 # Permission-denied. Hand the tree to the runtime user.
-RUN chown -R www-data:www-data /app/chamilo-lms
+#
+# DO NOT split this back into separate RUNs: the `chown -R` on files that
+# were written in *earlier* layers triggers an overlayfs copy-up — every file
+# is duplicated into the upper layer before its metadata changes — which adds
+# a ~600 MB phantom layer (image went 1.2 GB -> 1.83 GB when this was split).
+# In ONE layer the chown acts on in-layer files: no copy-up.
+# (No real caching is lost: a ref change rebuilds all three of these steps
+# today anyway, so the work is identical — only the layer count differs.)
+RUN curl -fsSL "https://github.com/chamilo/chamilo-lms/archive/${CHAMILO_LMS_REF}.tar.gz" -o /tmp/lms.tar.gz \
+    && mkdir -p /app/lms-fetch \
+    && tar -xzf /tmp/lms.tar.gz -C /app/lms-fetch \
+    && mv /app/lms-fetch/chamilo-lms-* /app/chamilo-lms \
+    && rm -f /tmp/lms.tar.gz \
+    && rm -rf /app/lms-fetch /root/.cache \
+    && cd /app/chamilo-lms \
+    && curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer \
+    && composer install --no-interaction --optimize-autoloader \
+    && composer install --no-interaction --no-dev --no-scripts --optimize-autoloader \
+    && rm -rf /root/.composer /root/.cache/composer \
+    && chown -R www-data:www-data /app/chamilo-lms
+
+WORKDIR /app/chamilo-lms
 
 # Start PHP-FPM (daemon) + nginx (foreground, PID 1) on container start.
 COPY --chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh
