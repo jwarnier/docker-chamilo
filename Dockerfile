@@ -49,10 +49,15 @@ RUN rm -f /etc/nginx/sites-enabled/default \
     && rm -rf /var/www/html
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
-# Raise PHP memory limit for CLI and any child processes.
-# Symfony's `assets:install` post-install script boots the kernel and
-# exhausts the 128M default; -1 keeps the build from OOM-ing.
-RUN echo "memory_limit=-1" > /usr/local/etc/php/conf.d/zz-memory.ini
+# PHP memory limit, split by context:
+#   * build: the global CLI ini is -1 so `assets:install` (a child `php` boot
+#     of the Symfony kernel, which reads the ini) can't OOM on the 128M
+#     default. That line is required for the build (see AGENTS.md gotcha #1).
+#   * runtime: the FPM `www` pool is bounded to 256M via php_admin_value — a
+#     per-pool directive that outranks the ini — so a web request can't
+#     allocate unboundedly. The -1 is NOT left in place for the web tier.
+RUN echo "memory_limit=-1" > /usr/local/etc/php/conf.d/zz-memory.ini \
+    && echo "php_admin_value[memory_limit] = 256M" >> /usr/local/etc/php-fpm.d/www.conf
 
 # Fetch the LMS source at the pinned ref (build-time, not vendored).
 # The tarball extracts to a single top-level dir (chamilo-lms-<ref>); rename
