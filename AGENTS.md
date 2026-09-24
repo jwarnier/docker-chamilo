@@ -52,14 +52,20 @@ docker exec chamilo nginx -t   # vhost is valid
 
 ## Gotchas (do not re-learn these the hard way)
 
-1. **`memory_limit` OOM.** Symfony's `assets:install` post-install script boots
-   the kernel and exhausts PHP's 128 M default. The Dockerfile writes
-   `memory_limit=-1` to `/usr/local/etc/php/conf.d/zz-memory.ini`. **Do not
-   remove that line.** If you override memory, the build OOMs in
-   `PhpConfigReferenceDumpPass`.
+1. **`memory_limit` OOM — split by context.** Symfony's `assets:install`
+   post-install script boots the kernel in a child `php` process and
+   exhausts PHP's 128 M default. The Dockerfile writes `memory_limit=-1` to
+   `/usr/local/etc/php/conf.d/zz-memory.ini` **for the build** — the child reads
+   the ini, and if you override memory the build OOMs in
+   `PhpConfigReferenceDumpPass`. It **also** bounds the runtime FPM `www` pool
+   to `256M` via `php_admin_value[memory_limit]` appended to
+   `/usr/local/etc/php-fpm.d/www.conf` — a per-pool directive that outranks the
+   ini — so a web request can't allocate unboundedly. **Do not remove either
+   part:** the build needs the `-1` ini, and the pool limit is what keeps the
+   runtime from running unlimited.
 2. **Nested `.git` bloat.** The old approach copied the LMS tree (with its
    1.2 GiB `.git`) into the image. This repo fetches a **tarball** (no `.git`),
-   so the image is ~1.3 GB. If you ever add a `COPY` of a source tree, you
+   so the image is ~1.2 GB. If you ever add a `COPY` of a source tree, you
    **must** `.dockerignore` the nested `.git`.
 3. **Env var names.** The app reads **`DATABASE_*`** (see `.env.dist` of the
    LMS), **not** `DB_*`. The compose sets `DATABASE_HOST=db` etc. Renaming
@@ -84,7 +90,7 @@ the latest tag).
 ## Repo hygiene
 
 - Keep it **slim**: no LMS source, no `vendor/`, no build artifacts.
-- Keep `.dockerignore` covering `.git`, `.github`, `*.log`, `tmp/`, and the
-  markdown docs (they're for humans, not the build).
+- Keep `.dockerignore` covering `.git`, `.github`, `*.log`, `tmp/`, and a
+  blanket `*.md` for the docs (they're for humans, not the build).
 - The old `000-default.conf` (Apache vhost) was removed — this image is
   nginx + FPM, not Apache mod_php. Don't reintroduce Apache.
