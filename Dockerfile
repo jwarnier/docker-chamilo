@@ -85,4 +85,4 @@ COPY --chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["nginx", "-g", "daemon off;"]
 
-EXPOSE 80 9000
+EXPOSE 80
