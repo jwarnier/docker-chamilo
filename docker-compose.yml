@@ -2,7 +2,7 @@
 #
 #   chamilo : the app (PHP 8.3-FPM + nginx, this repo's image) — HTTP on :80
 #   db      : MariaDB (LMS database)
-#   redis   : session/cache (optional, mapped to 6379)
+#   redis   : session/cache (optional; reachable on the compose network)
 #
 # The app reads DATABASE_* (see .env.dist), NOT DB_*. Values below are
 # defaults for a local dev bring-up; override for production.
@@ -50,8 +50,6 @@ services:
 
   redis:
     image: docker.io/library/redis:7
-    ports:
-      - "6379:6379"
     volumes:
       - redis_data:/data
     healthcheck:
