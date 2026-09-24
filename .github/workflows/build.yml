@@ -32,7 +32,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       # Build with the repo's own pinned ref — no --build-arg override, so
       # the CI build exercises exactly what a real build ships.
       - name: docker build
