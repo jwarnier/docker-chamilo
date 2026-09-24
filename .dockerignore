@@ -6,7 +6,7 @@
 .github
 *.log
 tmp/
-# Docs live in the repo for humans; the build never needs them in-context.
-AGENTS.md
-CLAUDE.md
-SETUP.md
+# Docs live in the repo for humans; the build never needs them in-context
+# (the only files the build uses are Dockerfile + nginx.conf + entrypoint.sh).
+# Blanket pattern so any future .md is auto-excluded, no per-file list to keep.
+*.md
