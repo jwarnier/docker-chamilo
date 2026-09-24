@@ -1,6 +1,6 @@
 # CI: the image must build.
 #
-# This is a docker-only repo — the only build that matters is `docker build`
+# This is a docker-only repo — the only build that matters is the image, built
 # with the pinned CHAMILO_LMS_REF (the Dockerfile's default ARG). This job
 # runs that exact build on push and on manual dispatch, catching the two
 # breakages this image is prone to instead of finding them at release time:
@@ -33,7 +33,19 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-      # Build with the repo's own pinned ref — no --build-arg override, so
-      # the CI build exercises exactly what a real build ships.
-      - name: docker build
-        run: docker build -t chamilo-lms-ci .
+
+      # Buildx builder for docker/build-push-action. Pinned to the latest
+      # published minor (a bare major would float across minors on its own).
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4.4.1
+
+      # Build (and load locally) with the repo's own pinned ref — no
+      # build-arg override, so CI exercises exactly what a real build ships.
+      # load: true materialises the final image (no registry push); the build
+      # itself is the assertion — a fetch or OOM failure fails the step.
+      - name: Build image
+        uses: docker/build-push-action@v7.4.0
+        with:
+          context: .
+          load: true
+          tags: chamilo-lms-ci:ci
