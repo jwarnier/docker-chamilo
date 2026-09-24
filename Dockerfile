@@ -8,7 +8,7 @@ FROM php:${PHP_VER}-fpm
 
 # Pinned ref of chamilo/chamilo-lms. Bump to release a new LMS version.
 # Accepts a git tag (e.g. v3.0.0-beta.2) or a full commit SHA.
-ARG CHAMILO_LMS_REF=c75d279bf4757617286827c5c8dae02a74f438e0
+ARG CHAMILO_LMS_REF=v3.0.1
 
 # System packages + PHP extensions the LMS needs.
 #   curl/ca-certificates : fetch the pinned source; Composer zip dists (TLS)

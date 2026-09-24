@@ -82,10 +82,9 @@ docker exec chamilo nginx -t   # vhost is valid
 ## Releasing a new LMS version
 
 Change **one** thing — the `CHAMILO_LMS_REF` build arg in the `Dockerfile`
-(to a tag like `v3.0.0` or a full commit SHA), commit, and rebuild. Prefer a
+(to a tag like `v3.0.1` or a full commit SHA), commit, and rebuild. Prefer a
 release **tag** for reproducible public builds; a moving SHA is fine for
-pinning "our exact current tree" (the current pin is a master SHA newer than
-the latest tag).
+pinning "our exact current tree".
 
 ## Repo hygiene
 
