@@ -34,9 +34,12 @@
 #   gate failed). When the pin already equals the latest stable tag it is a
 #   clean no-op — no weekly "all up to date" noise.
 #
-# All GitHub API calls go through actions/github-script (official `actions`
-# org action) — no hand-rolled curl/jq. Git (the one-line Dockerfile edit +
-# push) runs inside that same action's `exec`, using GITHUB_TOKEN.
+# HOW IT TALKS TO GITHUB: the `gh` CLI — preinstalled on the GitHub-hosted
+# ubuntu-latest runner and authenticated by GITHUB_TOKEN itself (no installer
+# action, no `gh auth login`). Each GitHub operation is a readable one-liner:
+# `gh api` for the release/compare lookups, `gh pr` to dedup/open the PR,
+# `gh issue` to dedup/file the report. Git is the repo's own (the one-line
+# Dockerfile edit + push). No hand-rolled curl/jq, no embedded JS.
 #
 # Cost: GitHub-hosted runners are free/unmetered for public repos, so this
 # is not metered against the 2,000-min/500 MB quota (private only). The real
@@ -79,35 +82,27 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4.4.1
 
-      # Detect drift: latest stable tag (chamilo/chamilo-lms) vs the current
-      # pin, read straight out of the checked-out Dockerfile (no shell grep).
-      # actions/github-script is the official `actions`-org action for driving
-      # the GitHub REST API from JS — replaces the old curl | jq step.
+      # Detect drift: latest stable tag vs the current pin (read out of the
+      # Dockerfile). `gh` is preinstalled on the runner; GITHUB_TOKEN authenticates
+      # it (no `gh auth login`). `releases/latest` is the latest STABLE release
+      # (404s if there is none — let it fail the run, don't guess).
       - name: Detect drift (latest stable tag vs current pin)
         id: detect
-        uses: actions/github-script@v9
-        with:
-          script: |
-            const fs = require('fs');
-            const lmsRepo = process.env.LMS_REPO;
-            // Current pin: the first "ARG CHAMILO_LMS_REF=<value>" in the Dockerfile.
-            const df = fs.readFileSync('Dockerfile', 'utf8');
-            const m = df.match(/^ARG[ \t]+CHAMILO_LMS_REF=(.+)$/m);
-            if (!m) throw new Error('CHAMILO_LMS_REF ARG not found in Dockerfile');
-            const CUR = m[1].trim();
-            // Latest STABLE release tag. releases/latest 404s if there is no
-            // stable release yet — let it fail the run, don't guess.
-            const latest = await github.rest.repos.getLatestRelease({ owner: lmsRepo, repo: lmsRepo });
-            const LATEST = latest.data.tag_name;
-            core.setOutput('CUR', CUR);
-            core.setOutput('LATEST', LATEST);
-            core.setOutput('DRIFT', CUR === LATEST ? 'false' : 'true');
-            console.log(`current pin: ${CUR}`);
-            console.log(`latest stable: ${LATEST}`);
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          LATEST="$(gh api "repos/${LMS_REPO}/releases/latest" --jq .tag_name)"
+          CUR="$(sed -n '/^ARG[[:space:]]*CHAMILO_LMS_REF=/{s/^ARG[[:space:]]*CHAMILO_LMS_REF=//p}' Dockerfile)"
+          DRIFT=false
+          [ "$CUR" != "$LATEST" ] && DRIFT=true
+          { echo "LATEST=$LATEST"; echo "CUR=$CUR"; echo "DRIFT=$DRIFT"; } >> "$GITHUB_ENV"
+          echo "current pin: $CUR"
+          echo "latest stable: $LATEST"
 
       # Up-to-date: nothing to say. No build, no PR, no Issue.
       - name: Up to date — no-op
-        if: steps.detect.outputs.DRIFT == 'false'
+        if: env.DRIFT == 'false'
         run: echo "CHAMILO_LMS_REF already equals the latest stable tag; nothing to open."
 
       # Build at the candidate ref — the gate. Runs only when there is drift.
@@ -115,143 +110,76 @@ jobs:
       # candidate ref as a build-arg. A failure here means NO PR is opened.
       #
       # NOTE: the gate conditions use `steps.gate.result` — the standard
-      # Actions step-status context (success/failure/cancelled/skipped),
-      # reflecting the build step's own run (`.result` is the current
-      # spelling; `.outcome` is the legacy alias). When DRIFT=false the gate
-      # is skipped, so result=='skipped' and neither downstream step runs.
+      # Actions step-status context (success/failure/cancelled/skipped). When
+      # DRIFT=false the gate is skipped, so result=='skipped' and neither
+      # downstream step runs.
       - name: Build-gate at candidate ref
-        if: steps.detect.outputs.DRIFT == 'true'
         id: gate
+        if: env.DRIFT == 'true'
         uses: docker/build-push-action@v7.4.0
         with:
           context: .
           load: true
           build-args: |
-            CHAMILO_LMS_REF=${{ steps.detect.outputs.LATEST }}
-          tags: dep-drift-gate:${{ steps.detect.outputs.LATEST }}
+            CHAMILO_LMS_REF=${{ env.LATEST }}
+          tags: dep-drift-gate:${{ env.LATEST }}
 
-      # Build failed: NO PR. Record it as the drift Issue instead (dedup by ref).
-      - name: Record build-gate failure (no PR opened)
-        if: steps.detect.outputs.DRIFT == 'true' && steps.gate.result == 'failure'
+      # Build failed: NO PR. File a drift Issue recording the failure (dedup by ref).
+      - name: File drift Issue (build FAILED — no PR opened)
+        if: env.DRIFT == 'true' && steps.gate.result == 'failure'
         env:
-          LATEST: ${{ steps.detect.outputs.LATEST }}
-        uses: actions/github-script@v9
-        with:
-          script: |
-            const lmsRepo = process.env.LMS_REPO;
-            const LATEST = process.env.LATEST;
-            const TITLE = `chamilo-lms drift (build FAILED) ${LATEST}`;
-            // Dedup: an open Issue already records this failure for this ref?
-            const issues = await github.rest.issues.listForRepo({
-              owner: context.repo.owner, repo: context.repo.repo, state: 'open',
-            });
-            const dup = issues.data.find((i) => i.title === TITLE);
-            if (dup) {
-              console.log(`A failure Issue for ${LATEST} already exists (#${dup.number}); not duplicating.`);
-              process.exit(0);
-            }
-            const body = `The weekly dep-drift build-gate failed building the image at CHAMILO_LMS_REF=${LATEST},\n` +
-              'so NO bump PR was opened (fail-closed). The current pin remains unchanged.\n' +
-              'See the dep-drift workflow run for the build log. Once the build passes at this\n' +
-              'ref, re-run the workflow to open the PR.';
-            const created = await github.rest.issues.create({
-              owner: context.repo.owner, repo: context.repo.repo, title: TITLE, body,
-            });
-            console.log(`Opened failure Issue #${created.data.number}`);
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LATEST: ${{ env.LATEST }}
+        run: |
+          set -euo pipefail
+          TITLE="chamilo-lms drift (build FAILED) ${LATEST}"
+          if gh issue list --state open --json title --jq '.[].title' | grep -Fxq "$TITLE"; then
+            echo "A failure Issue for ${LATEST} already exists; not duplicating."
+            exit 0
+          fi
+          gh issue create --title "$TITLE" --body "Build-gate FAILED building the image at CHAMILO_LMS_REF=${LATEST}; no bump PR was opened (fail-closed). The current pin is unchanged. See the dep-drift run log for the build failure."
 
       # Build succeeded: open the one-line bump PR (dedup by branch), then file
       # the weekly drift report Issue (dedup by from->to pair).
       - name: Open bump PR + file drift Issue
-        if: steps.detect.outputs.DRIFT == 'true' && steps.gate.result == 'success'
+        if: env.DRIFT == 'true' && steps.gate.result == 'success'
         env:
-          CUR: ${{ steps.detect.outputs.CUR }}
-          LATEST: ${{ steps.detect.outputs.LATEST }}
-        uses: actions/github-script@v9
-        with:
-          script: |
-            const fs = require('fs');
-            const CUR = process.env.CUR;
-            const LATEST = process.env.LATEST;
-            const lmsRepo = process.env.LMS_REPO;
-            const prefix = process.env.PR_BRANCH_PREFIX;
-            const token = process.env.GITHUB_TOKEN;
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
-            const BRANCH = `${prefix}${LATEST}`;
-            const gitIdName = 'github-actions[bot]';
-            const gitIdEmail = '41898282+github-actions[bot]@users.noreply.github.com';
-            // Default branch of THIS repo (self-addressing: fork master today,
-            // upstream master if this workflow is copied there later).
-            const { data: repoInfo } = await github.rest.repos.get({ owner, repo });
-            const DEFAULT_BRANCH = repoInfo.default_branch;
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CUR: ${{ env.CUR }}
+          LATEST: ${{ env.LATEST }}
+          PR_BRANCH_PREFIX: ${{ env.PR_BRANCH_PREFIX }}
+        run: |
+          set -euo pipefail
+          BRANCH="${PR_BRANCH_PREFIX}${LATEST}"
+          TITLE_PR="build: bump CHAMILO_LMS_REF to ${LATEST}"
+          # Commit identity = the workflow bot (deterministic; no local git config).
+          BOT_NAME="github-actions[bot]"
+          BOT_EMAIL="41898282+github-actions[bot]@users.noreply.github.com"
 
-            // Dedup: an open PR already targets this ref?
-            const existingPrs = await github.rest.pulls.list({ owner, repo, state: 'open', head: BRANCH });
-            let NO_PR = existingPrs.data.length > 0;
-            if (NO_PR) {
-              console.log(`An open PR for ${BRANCH} already exists (#${existingPrs.data[0].number}); skipping the PR.`);
-            }
+          # --- The bump PR (dedup by branch: skip if one for this ref is already open).
+          if [ -z "$(gh pr list --state open --head "$BRANCH" --json headRefName --jq '.[].headRefName' 2>/dev/null || true)" ]; then
+            git checkout -b "$BRANCH"
+            # One-line edit: rewrite the ARG line (wherever it is), value -> newest stable.
+            sed -i '/^ARG[[:space:]]*CHAMILO_LMS_REF=/{s/^ARG[[:space:]]*CHAMILO_LMS_REF=.*/ARG CHAMILO_LMS_REF='"${LATEST}"'/}' Dockerfile
+            git add Dockerfile
+            git -c user.name="$BOT_NAME" -c user.email="$BOT_EMAIL" \
+              commit -m "$TITLE_PR" \
+              -m "Bumps the pinned ${LMS_REPO} ref from ${CUR} to the latest stable release ${LATEST} (one-line, fail-closed: this run built the image at ${LATEST} before opening)."
+            # Push with GITHUB_TOKEN (contents:write -> fresh-branch push to THIS repo is allowed).
+            git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/$(gh repo view --json nameWithOwner -q .nameWithOwner).git"
+            git push -u origin "$BRANCH"
+            # `--head` skips any fork/push prompt (the branch is already pushed).
+            gh pr create --head "$BRANCH" --title "$TITLE_PR" --body "Bumps the pinned CHAMILO_LMS_REF from ${CUR} to the latest stable release ${LATEST}. Opened automatically by the weekly dep-drift workflow, which built the image at ${LATEST} before opening it (fail-closed). The push re-runs build.yml as a second gate. Review the one-line diff; no auto-merge."
+          else
+            echo "An open PR for ${BRANCH} already exists; not opening a duplicate."
+          fi
 
-            if (!NO_PR) {
-              // exec.exec RESOLVES with the exit code — it does not throw on a
-              // non-zero exit — so wrap it: a failed `git push` must fail this
-              // step, not open a PR pointing at a branch that never got pushed.
-              const run = async (cmd, args) => {
-                const code = await exec.exec(cmd, args);
-                if (code != null && code !== 0) throw new Error(`${cmd} ${args.join(' ')} failed (exit ${code})`);
-              };
-              // One-line Dockerfile edit + push via the action's git. exec.exec
-              // runs the command with an ARGS ARRAY (no shell), so the tag and
-              // repo values pass through verbatim — nothing to shell-quote.
-              await run('git', ['checkout', '-b', BRANCH]);
-              const df = fs.readFileSync('Dockerfile', 'utf8');
-              if (!/^ARG[ \t]+CHAMILO_LMS_REF=.*$/m.test(df)) throw new Error('CHAMILO_LMS_REF ARG not found in Dockerfile');
-              fs.writeFileSync('Dockerfile', df.replace(/^ARG[ \t]+CHAMILO_LMS_REF=.*$/m, `ARG CHAMILO_LMS_REF=${LATEST}`));
-              await run('git', ['add', 'Dockerfile']);
-              await run('git', [
-                '-c', `user.name=${gitIdName}`,
-                '-c', `user.email=${gitIdEmail}`,
-                'commit',
-                '-m', `build: bump CHAMILO_LMS_REF to ${LATEST}`,
-                '-m', `Bumps the pinned ${lmsRepo} ref from ${CUR} to the latest stable release ${LATEST} (one-line, fail-closed: this run built the image at ${LATEST} before opening).`,
-              ]);
-              // Push with GITHUB_TOKEN (we hold contents:write, so a fresh-branch
-              // push to THIS repo is allowed — no PAT needed).
-              await run('git', ['remote', 'set-url', 'origin', `https://x-access-token:${token}@github.com/${owner}/${repo}.git`]);
-              await run('git', ['push', '-u', 'origin', BRANCH]);
-            }
-
-            // File the weekly drift report Issue (dedup by from->to).
-            const TITLE = `chamilo-lms drift ${CUR} -> ${LATEST}`;
-            const issues = await github.rest.issues.listForRepo({ owner, repo, state: 'open' });
-            const dup = issues.data.find((i) => i.title === TITLE);
-            if (dup) {
-              console.log(`A drift Issue for this pair already exists (#${dup.number}); not duplicating.`);
-              process.exit(0);
-            }
-            // How many commits the latest tag is ahead of the pin (best-effort).
-            let AHEAD = '?';
-            try {
-              const cmp = await github.rest.repos.compareCommits({ owner: lmsRepo, repo: lmsRepo, baseCommit: CUR, headCommit: LATEST });
-              AHEAD = cmp.data.ahead_by;
-            } catch (e) { AHEAD = '?'; }
-            const body = `Weekly dep-drift report.\n` +
-              `- Current pin: ${CUR}\n` +
-              `- Latest stable: ${LATEST} (${AHEAD} commits ahead of the pin)\n` +
-              `- Outcome: build-gate PASSED at ${LATEST}; a bump PR was opened (or already open).\n` +
-              'This Issue is the weekly report; the actual change is the linked PR (one-line\n' +
-              'Dockerfile diff). Opened automatically by the dep-drift workflow; not auto-merged.';
-            const createdIssue = await github.rest.issues.create({ owner, repo, title: TITLE, body });
-
-            // Open the PR (REST: self-addresses the repo; no gh binary to pin).
-            if (!NO_PR) {
-              const prBody = `Bumps the pinned CHAMILO_LMS_REF from ${CUR} to the latest stable release ${LATEST}.\n` +
-                'This PR was opened automatically by the weekly dep-drift workflow, which built\n' +
-                `the image at ${LATEST} before opening it (fail-closed). The push re-runs the build\n` +
-                'job as a second gate. Review the one-line diff and merge; no auto-merge.';
-              const createdPr = await github.rest.pulls.create({
-                owner, repo, title: `build: bump CHAMILO_LMS_REF to ${LATEST}`,
-                head: BRANCH, base: DEFAULT_BRANCH, body: prBody,
-              });
-              console.log(`Opened PR #${createdPr.data.number}`);
-            }
+          # --- The weekly drift report Issue (dedup by the from->to pair).
+          TITLE_ISSUE="chamilo-lms drift ${CUR} -> ${LATEST}"
+          if gh issue list --state open --json title --jq '.[].title' | grep -Fxq "$TITLE_ISSUE"; then
+            echo "A drift Issue for this pair already exists; not duplicating."
+          else
+            # How many commits the latest tag is ahead of the pin (best-effort).
+            AHEAD="$(gh api "repos/${LMS_REPO}/compare/${CUR}...${LATEST}" --jq .ahead_by 2>/dev/null || echo '?')"
+            gh issue create --title "$TITLE_ISSUE" --body "Weekly dep-drift report. Current pin ${CUR}, latest stable ${LATEST} (${AHEAD} commits ahead). Build-gate PASSED at ${LATEST}; a bump PR was opened (or is already open). The change is the linked PR (one-line Dockerfile diff). Not auto-merged."
+          fi
